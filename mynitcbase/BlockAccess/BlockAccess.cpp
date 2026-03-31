@@ -413,44 +413,56 @@ retVal=RelCacheTable::resetSearchIndex(RELCAT_RELID);
         return retVal;
 
 
-        if(attrCatHead.numEntries==0)
-        {
-            RecBuffer attrCatLeftBlock(attrCatHead.lblock);
-            struct HeadInfo attrCatLeftHead;
-            retVal=attrCatLeftBlock.getHeader(&attrCatLeftHead);
-            if(retVal!=SUCCESS)
-            return retVal;
-            attrCatLeftHead.rblock=attrCatHead.rblock;
-            retVal=attrCatLeftBlock.setHeader(&attrCatLeftHead);
-            if(retVal!=SUCCESS)
-            return retVal;
-            if(attrCatHead.rblock!=-1)
-            {
-                struct HeadInfo attrCatRightHead;
-                RecBuffer attrCatRightBlock(attrCatHead.rblock);
-                retVal=attrCatRightBlock.getHeader(&attrCatRightHead);
-                
-                if(retVal!=SUCCESS)
-                return retVal;
-                attrCatRightHead.lblock=attrCatHead.lblock;
-                retVal=attrCatRightBlock.setHeader(&attrCatRightHead);
-                if(retVal!=SUCCESS)
-                return retVal;
-            }
-            
-            else{
-                RecBuffer relCatBuffer(RELCAT_BLOCK);
-                Attribute relCatRecord[RELCAT_NO_ATTRS];
-                retVal=relCatBuffer.getRecord(relCatRecord,RELCAT_SLOTNUM_FOR_ATTRCAT);
-                if(retVal!=SUCCESS)
-                return retVal;
-                relCatRecord[RELCAT_LAST_BLOCK_INDEX].nVal=attrCatHead.lblock;
-                retVal=relCatBuffer.setRecord(relCatRecord,RELCAT_SLOTNUM_FOR_ATTRCAT);
-                if(retVal!=SUCCESS)
-                return retVal;
-            }
-            attrCatRecBuffer.releaseBlock();
-        }
+        if (attrCatHead.numEntries == 0) {
+
+    // Guard: only update left block's rblock if a left block actually exists.
+    // If lblock == -1, this is the first attrcat block — there is no left neighbour.
+    if (attrCatHead.lblock != -1) {
+        RecBuffer attrCatLeftBlock(attrCatHead.lblock);
+        struct HeadInfo attrCatLeftHead;
+        retVal = attrCatLeftBlock.getHeader(&attrCatLeftHead);
+        if (retVal != SUCCESS) return retVal;
+
+        attrCatLeftHead.rblock = attrCatHead.rblock;
+
+        retVal = attrCatLeftBlock.setHeader(&attrCatLeftHead);
+        if (retVal != SUCCESS) return retVal;
+    } else {
+        // This was the first attrcat block — update ATTRCAT's firstBlk
+        // in the relation catalog cache to point to the next block.
+        // (rblock becomes the new first block of the attrcat chain)
+        RelCatEntry attrCatRelEntry;
+        RelCacheTable::getRelCatEntry(ATTRCAT_RELID, &attrCatRelEntry);
+        attrCatRelEntry.firstBlk = attrCatHead.rblock;
+        RelCacheTable::setRelCatEntry(ATTRCAT_RELID, &attrCatRelEntry);
+    }
+
+    if (attrCatHead.rblock != -1) {
+        struct HeadInfo attrCatRightHead;
+        RecBuffer attrCatRightBlock(attrCatHead.rblock);
+        retVal = attrCatRightBlock.getHeader(&attrCatRightHead);
+        if (retVal != SUCCESS) return retVal;
+
+        attrCatRightHead.lblock = attrCatHead.lblock;
+
+        retVal = attrCatRightBlock.setHeader(&attrCatRightHead);
+        if (retVal != SUCCESS) return retVal;
+    } else {
+        // This was also the last attrcat block — update ATTRCAT's lastBlk.
+        // After release, the attrcat chain has no blocks at all.
+        RecBuffer relCatBuffer(RELCAT_BLOCK);
+        Attribute relCatRecord[RELCAT_NO_ATTRS];
+        retVal = relCatBuffer.getRecord(relCatRecord, RELCAT_SLOTNUM_FOR_ATTRCAT);
+        if (retVal != SUCCESS) return retVal;
+
+        relCatRecord[RELCAT_LAST_BLOCK_INDEX].nVal = attrCatHead.lblock;
+
+        retVal = relCatBuffer.setRecord(relCatRecord, RELCAT_SLOTNUM_FOR_ATTRCAT);
+        if (retVal != SUCCESS) return retVal;
+    }
+
+    attrCatRecBuffer.releaseBlock();
+}
     }
     struct HeadInfo relCatHead;
     RecBuffer relCatBuffer(RELCAT_BLOCK);
@@ -481,3 +493,93 @@ retVal=RelCacheTable::resetSearchIndex(RELCAT_RELID);
 
     return SUCCESS;
 }   
+/*
+NOTE: the caller is expected to allocate space for the argument `record` based
+      on the size of the relation. This function will only copy the result of
+      the projection onto the array pointed to by the argument.
+*/
+int BlockAccess::project(int relId, Attribute *record) {
+
+    // Get the previous search index of the relation relId from the relation cache.
+    // This tells us where the last project/search operation left off.
+    RecId prevRecId;
+    RelCacheTable::getSearchIndex(relId, &prevRecId);
+
+    // block and slot will hold the starting position for this iteration.
+    int block, slot;
+
+    /* If the current search index is invalid (i.e. = {-1, -1}),
+       this means the caller has reset the search index, indicating
+       a fresh/new project operation — start from the very beginning. */
+    if (prevRecId.block == INVALID_BLOCKNUM && prevRecId.slot == -1) {
+
+        // Fetch the relation catalog entry to get metadata about this relation.
+        RelCatEntry relCatBuf;
+        RelCacheTable::getRelCatEntry(relId, &relCatBuf);
+
+        // Start scanning from the very first record block of the relation, slot 0.
+        block = relCatBuf.firstBlk;
+        slot = 0;
+
+    } else {
+        // A project/search operation is already in progress.
+        // Resume from just after the previously returned record.
+        block = prevRecId.block;
+        slot = prevRecId.slot + 1; // move to the next slot
+    }
+
+    // The following code finds the next occupied record in the relation
+    // starting from (block, slot), scanning block by block.
+
+    /* Iterate over blocks (linked via rblock) until we either find an
+       occupied slot or exhaust all blocks (block becomes INVALID_BLOCKNUM). */
+    while (block != INVALID_BLOCKNUM) {
+
+        // Create a RecBuffer for the current block to read its contents.
+        RecBuffer recBuffer(block);
+
+        // Read the header to get metadata: numSlots, rblock, etc.
+        HeadInfo header;
+        recBuffer.getHeader(&header);
+
+        // Read the slot map to know which slots are occupied or free.
+        unsigned char slotMap[header.numSlots];
+        recBuffer.getSlotMap(slotMap);
+
+        if (slot >= header.numSlots) {
+            // No more slots in the current block — move to the next block.
+            // rblock holds the block number of the next record block
+            // (INVALID_BLOCKNUM = -1 if this is the last block, ending the loop).
+            block = header.rblock;
+            slot = 0; // reset slot to the beginning of the new block
+        }
+        else if (slotMap[slot] == SLOT_UNOCCUPIED) {
+            // This slot is free/deleted — skip it and check the next slot.
+            slot++;
+        }
+        else {
+            // Found an occupied slot — this is our next record to return.
+            break;
+        }
+    }
+
+    // If block is INVALID_BLOCKNUM, we've scanned all records without finding one.
+    if (block == INVALID_BLOCKNUM) {
+        // All records have been exhausted — signal end of scan to the caller.
+        return E_NOTFOUND;
+    }
+
+    // Store the RecId of the found record.
+    RecId nextRecId{block, slot};
+
+    // Update the search index in the relation cache to this record's position,
+    // so the next call to project() will continue from the record after this one.
+    RelCacheTable::setSearchIndex(relId, &nextRecId);
+
+    // Instantiate a RecBuffer for the found block and fetch the record at `slot`
+    // into the caller-provided `record` buffer.
+    RecBuffer recBuffer(block);
+    recBuffer.getRecord(record, slot);
+
+    return SUCCESS;
+}

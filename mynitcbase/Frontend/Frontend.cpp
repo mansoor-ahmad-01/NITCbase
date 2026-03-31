@@ -60,26 +60,67 @@ int Frontend::insert_into_table_values(char relname[ATTR_SIZE], int attr_count, 
 }
 
 int Frontend::select_from_table(char relname_source[ATTR_SIZE], char relname_target[ATTR_SIZE]) {
-  // Algebra::project
-  return SUCCESS;
+
+    
+    return Algebra::project(relname_source, relname_target);
 }
 
-int Frontend::select_attrlist_from_table(char relname_source[ATTR_SIZE], char relname_target[ATTR_SIZE],
-                                         int attr_count, char attr_list[][ATTR_SIZE]) {
-  // Algebra::project
-  return SUCCESS;
-}
+int Frontend::select_attrlist_from_table(char relname_source[ATTR_SIZE],
+                                         char relname_target[ATTR_SIZE],
+                                         int attr_count,
+                                         char attr_list[][ATTR_SIZE]) {
 
+   
+    return Algebra::project(relname_source, relname_target, attr_count, attr_list);
+}
 int Frontend::select_from_table_where(char relname_source[ATTR_SIZE], char relname_target[ATTR_SIZE],
                                       char attribute[ATTR_SIZE], int op, char value[ATTR_SIZE]) {
   return Algebra::select(relname_source, relname_target, attribute, op, value);
 }
 
-int Frontend::select_attrlist_from_table_where(char relname_source[ATTR_SIZE], char relname_target[ATTR_SIZE],
-                                               int attr_count, char attr_list[][ATTR_SIZE],
-                                               char attribute[ATTR_SIZE], int op, char value[ATTR_SIZE]) {
-  // Algebra::select + Algebra::project??
-  return SUCCESS;
+int Frontend::select_attrlist_from_table_where(
+    char relname_source[ATTR_SIZE], char relname_target[ATTR_SIZE],
+    int attr_count, char attr_list[][ATTR_SIZE],
+    char attribute[ATTR_SIZE], int op, char value[ATTR_SIZE]) {
+
+    // Step 1: Perform the WHERE filtering first via Algebra::select().
+    // This creates a temporary relation TEMP containing ALL attributes of
+    // srcRel but only the records that satisfy the condition (attribute op value).
+    // We use TEMP as an intermediate relation before applying the attribute projection.
+    int selectRet = Algebra::select(relname_source, TEMP, attribute, op, value);
+
+    // If the select fails (e.g. E_RELNOTOPEN, E_ATTRNOTEXIST, disk full),
+    // propagate the error — TEMP was not created so nothing to clean up.
+    if (selectRet != SUCCESS) {
+        return selectRet;
+    }
+
+    // Step 2: Open the TEMP relation to make it available for the project operation.
+    // TEMP was created and closed by Algebra::select(), so we need to reopen it.
+    int tempRelId = OpenRelTable::openRel(TEMP);
+
+    // If opening TEMP fails, delete it to avoid leaving an orphaned relation
+    // on disk, then propagate the error.
+    if (tempRelId < 0) {
+        Schema::deleteRel(TEMP);
+        return tempRelId;
+    }
+
+    // Step 3: Project the desired attributes from TEMP into the actual target relation.
+    // This applies the attribute list filter on the already-filtered TEMP relation,
+    // producing a relation with only the rows AND columns the user requested.
+    int projectRet = Algebra::project(TEMP, relname_target, attr_count, attr_list);
+
+    // Step 4: Close TEMP regardless of whether project succeeded or failed.
+    // We must release the open relation table entry before deleting.
+    OpenRelTable::closeRel(tempRelId);
+
+    // Step 5: Delete TEMP — it was only an intermediate relation and should
+    // not persist after this operation completes.
+    Schema::deleteRel(TEMP);
+
+    // Return the result of the project step (SUCCESS or an error code).
+    return projectRet;
 }
 
 int Frontend::select_from_join_where(char relname_source_one[ATTR_SIZE], char relname_source_two[ATTR_SIZE],
