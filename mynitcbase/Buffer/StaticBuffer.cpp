@@ -125,3 +125,25 @@ int StaticBuffer::setDirtyBit(int blockNum)
     metainfo[buffernum].dirty=true;
     return SUCCESS;
 }
+int StaticBuffer::getStaticBlockType(int blockNum) {
+    // Check if blockNum is valid (non-zero and less than number of disk blocks)
+    // blockNum must be in range [0, DISK_BLOCKS-1] where DISK_BLOCKS = 8192 (from constants.h)
+    // Note: Block 0 is valid (it's typically used for metadata)
+    if (blockNum < 0 || blockNum >= DISK_BLOCKS) {
+        return E_OUTOFBOUND;  // Block number is out of valid range
+    }
+    
+    // Access the entry in block allocation map corresponding to the blockNum argument
+    // blockAllocMap is a static array that stores the type of each block on disk
+    // Each entry is an unsigned char representing the block type
+    unsigned char blockType = blockAllocMap[blockNum];
+    
+    // Return the block type after type casting to integer
+    // Possible block types (from constants.h enum BlockType):
+    //   REC = 0 (record block)
+    //   IND_INTERNAL = 1 (internal index block)
+    //   IND_LEAF = 2 (leaf index block)
+    //   UNUSED_BLK = 3 (unused block)
+    //   BMAP = 4 (block allocation map)
+    return (int)blockType;
+}

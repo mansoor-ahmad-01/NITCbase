@@ -1,6 +1,10 @@
 #include "BlockAccess.h"
 #include <cstring>
 #include<stdio.h>
+
+
+int BlockAccess::comparisons=0;
+
 RecId BlockAccess::linearSearch(int relId, char attrName[ATTR_SIZE], union Attribute attrVal, int op) {
     // get the previous search index of the relation relId from the relation cache
     // (use RelCacheTable::getSearchIndex() function)
@@ -91,6 +95,7 @@ RecId BlockAccess::linearSearch(int relId, char attrName[ATTR_SIZE], union Attri
 
         /* use the attribute offset to get the value of the attribute from
            current record */
+           comparisons++;
 
         int cmpVal;  // will store the difference between the attributes
         // set cmpVal using compareAttrs()
@@ -318,23 +323,58 @@ int BlockAccess::insert(int relId,Attribute *record)
 int BlockAccess::search(int relId, Attribute *record, char attrName[ATTR_SIZE], Attribute attrVal, int op) {
     // Declare a variable called recid to store the searched record
     RecId recId;
-
-    /* search for the record id (recid) corresponding to the attribute with
-    attribute name attrName, with value attrval and satisfying the condition op
-    using linearSearch() */
-    recId=linearSearch(relId,attrName,attrVal,op);
+    
+    /* get the attribute catalog entry from the attribute cache corresponding
+       to the relation with Id=relid and with attribute_name=attrName  */
+    AttrCatEntry attrCatEntry;
+    int ret = AttrCacheTable::getAttrCatEntry(relId, attrName, &attrCatEntry);
+    
+    // if this call returns an error, return the appropriate error code
+    if (ret != SUCCESS) {
+        return ret;  // Return error code (e.g., E_ATTRNOTEXIST, E_RELNOTOPEN, etc.)
+    }
+    
+    // get rootBlock from the attribute catalog entry
+    int rootBlock = attrCatEntry.rootBlock;
+    
+    /* if Index does not exist for the attribute (check rootBlock == -1) */
+    if (rootBlock == INVALID_BLOCKNUM) {
+        /* search for the record id (recid) corresponding to the attribute with
+           attribute name attrName, with value attrval and satisfying the
+           condition op using linearSearch()
+        */
+        recId = linearSearch(relId, attrName, attrVal, op);
+    }
+    /* else */ 
+    else {
+        // (index exists for the attribute)
+        /* search for the record id (recid) corresponding to the attribute with
+           attribute name attrName and with value attrval and satisfying the
+           condition op using BPlusTree::bPlusSearch() */
+        recId = BPlusTree::bPlusSearch(relId, attrName, attrVal, op);
+    }
+    
     // if there's no record satisfying the given condition (recId = {-1, -1})
-    //    return E_NOTFOUND;
-    if(recId.block==-1&&recId.slot==-1)
-    return E_NOTFOUND;
-
-    RecBuffer recBuffer(recId.block);
-    recBuffer.getRecord(record,recId.slot);
-    /* Copy the record with record id (recId) to the record buffer (record)
-       For this Instantiate a RecBuffer class object using recId and
-       call the appropriate method to fetch the record
+    if (recId.block == -1 && recId.slot == -1) {
+        return E_NOTFOUND;  // No matching record found
+    }
+    
+    /* Copy the record with record id (recId) to the record buffer (record).
+       For this, instantiate a RecBuffer class object by passing the recId.block
+       and call the appropriate method to fetch the record
     */
-
+    // Create a RecBuffer object for the block containing the record
+    RecBuffer recBuffer(recId.block);
+    
+    // Fetch the record from the specified slot into the record buffer
+    ret = recBuffer.getRecord(record, recId.slot);
+    
+    // If getRecord() fails, return the error code
+    if (ret != SUCCESS) {
+        return ret;
+    }
+    
+    // Record successfully retrieved and copied to the record buffer
     return SUCCESS;
 }
 

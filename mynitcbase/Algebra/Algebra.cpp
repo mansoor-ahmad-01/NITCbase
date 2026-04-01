@@ -3,6 +3,7 @@
 #include <cstring>
 #include<stdio.h>
 #include<cstdlib>
+#include<iostream>
 /* used to select all the records that satisfy a condition.
 the arguments of the function are
 - srcRel - the source relation we want to select from
@@ -99,125 +100,158 @@ bool isNumber(char *str);
 //   return SUCCESS;
 // }
 int Algebra::select(char srcRel[ATTR_SIZE], char targetRel[ATTR_SIZE], char attr[ATTR_SIZE], int op, char strVal[ATTR_SIZE]) {
-
-    // Get the rel-id of srcRel from the Open Relation Table.
-    // This is needed for all cache and block access operations.
-    int srcRelId = OpenRelTable::getRelId(srcRel);
-
-    // If srcRel is not currently open, we cannot proceed.
-    if (srcRelId == E_RELNOTOPEN) {
-        return E_RELNOTOPEN;
+    // get the srcRel's rel-id (let it be srcRelid), using OpenRelTable::getRelId()
+    int srcRelid=OpenRelTable::getRelId(srcRel);
+    // if srcRel is not open in open relation table, return E_RELNOTOPEN
+    if(srcRelid==E_RELNOTOPEN)
+    {
+      return E_RELNOTOPEN;
     }
 
-    // Fetch the attribute catalog entry for the given attribute `attr`
-    // to determine its type (NUMBER or STRING) and other metadata.
+    // get the attr-cat entry for attr, using AttrCacheTable::getAttrCatEntry()
     AttrCatEntry attrCatEntry;
-    int attrCatRet = AttrCacheTable::getAttrCatEntry(srcRelId, attr, &attrCatEntry);
-
-    // If the attribute does not exist in the relation, return error.
-    if (attrCatRet != SUCCESS) {
+    int ret = AttrCacheTable::getAttrCatEntry(srcRelid,attr,&attrCatEntry);
+    // if getAttrcatEntry() call fails return E_ATTRNOTEXIST
+    if(ret != SUCCESS)
+    {
         return E_ATTRNOTEXIST;
     }
 
-    /*** Convert strVal to an Attribute value of the appropriate type ***/
+    /*** Convert strVal to an attribute of data type NUMBER or STRING ***/
 
     Attribute attrVal;
     int type = attrCatEntry.attrType;
 
-    if (type == NUMBER) {
-        // Check if strVal is a valid number string before converting.
-        if (isNumber(strVal)) {
-            // Convert the string to a double and store in the nVal field.
-            attrVal.nVal = atof(strVal);
-        } else {
-            // strVal cannot be interpreted as a number — type mismatch.
+    if (type == NUMBER)
+    {
+        // if the input argument strVal can be converted to a number
+        // (check this using isNumber() function)
+        if(isNumber(strVal))
+        {
+            // convert strVal to double and store it at attrVal.nVal using atof()
+            attrVal.nVal=atof(strVal);
+        }
+        else
+        {
             return E_ATTRTYPEMISMATCH;
         }
-    } else if (type == STRING) {
-        // Copy the string value directly into the sVal field of the attribute.
-        strcpy(attrVal.sVal, strVal);
+    }
+    else if (type == STRING)
+    {
+        // copy strVal to attrVal.sVal
+        strcpy(attrVal.sVal,strVal);
     }
 
     /*** Creating and opening the target relation ***/
+    // Prepare arguments for createRel() in the following way:
+    // get RelcatEntry of srcRel using RelCacheTable::getRelCatEntry()
+    RelCatEntry relcatentry;
+    RelCacheTable::getRelCatEntry(srcRelid,&relcatentry);
+    int src_nAttrs = relcatentry.numAttrs;
 
-    // Fetch the relation catalog entry of srcRel to know the number of
-    // attributes and their layout, which the target relation will mirror.
-    RelCatEntry srcRelCatEntry;
-    RelCacheTable::getRelCatEntry(srcRelId, &srcRelCatEntry);
 
-    // The target relation will have the same schema as the source relation.
-    int src_nAttrs = srcRelCatEntry.numAttrs;
+    /* let attr_names[src_nAttrs][ATTR_SIZE] be a 2D array of type char
+        (will store the attribute names of rel). */
+        char attr_names[src_nAttrs][ATTR_SIZE];
+    // let attr_types[src_nAttrs] be an array of type int
+        int attr_types[src_nAttrs];
 
-    // Arrays to hold attribute names and types for Schema::createRel().
-    char attr_names[src_nAttrs][ATTR_SIZE];
-    int attr_types[src_nAttrs];
-
-    // Populate attr_names and attr_types by reading each attribute's
-    // catalog entry from the attribute cache of the source relation.
-    for (int i = 0; i < src_nAttrs; i++) {
-        AttrCatEntry iAttrCatEntry;
-        // Fetch the i-th attribute by offset index.
-        AttrCacheTable::getAttrCatEntry(srcRelId, i, &iAttrCatEntry);
-
-        // Copy attribute name and type into the arrays.
-        strcpy(attr_names[i], iAttrCatEntry.attrName);
-        attr_types[i] = iAttrCatEntry.attrType;
+    /*iterate through 0 to src_nAttrs-1 :
+        get the i'th attribute's AttrCatEntry using AttrCacheTable::getAttrCatEntry()
+        fill the attr_names, attr_types arrays that we declared with the entries
+        of corresponding attributes
+    */
+    for(int i=0;i<src_nAttrs;i++)
+    {
+      AttrCatEntry attrcatentry;
+      AttrCacheTable::getAttrCatEntry(srcRelid,i,&attrcatentry);
+      strcpy(attr_names[i],attrcatentry.attrName);
+      attr_types[i]=attrcatentry.attrType;
     }
 
-    // Create the target relation with the same schema as the source.
-    int createRet = Schema::createRel(targetRel, src_nAttrs, attr_names, attr_types);
 
-    // If creation fails (e.g. relation already exists, disk full), propagate error.
-    if (createRet != SUCCESS) {
-        return createRet;
+    /* Create the relation for target relation by calling Schema::createRel()
+       by providing appropriate arguments */
+    // if the createRel returns an error code, then return that value.
+    ret = Schema::createRel(targetRel, src_nAttrs, attr_names, attr_types);
+    if(ret != SUCCESS)
+    {
+        return ret;
     }
 
-    // Open the newly created target relation to get its rel-id for insertion.
+    /* Open the newly created target relation by calling OpenRelTable::openRel()
+       method and store the target relid */
+    /* If opening fails, delete the target relation by calling Schema::deleteRel()
+       and return the error value returned from openRel() */
     int targetRelId = OpenRelTable::openRel(targetRel);
-
-    // If opening fails, clean up by deleting the just-created target relation
-    // before returning the error — we don't want an orphaned relation on disk.
-    if (targetRelId < 0) {
+    if(targetRelId < 0)
+    {
         Schema::deleteRel(targetRel);
         return targetRelId;
     }
 
-    /*** Selecting and inserting matching records into the target relation ***/
+    /*** Selecting and inserting records into the target relation ***/
+    /* Before calling the search function, reset the search to start from the
+       first using RelCacheTable::resetSearchIndex() */
 
-    // Buffer to hold one record fetched from the source relation.
     Attribute record[src_nAttrs];
 
-    // Reset the search index of the source relation in the relation cache
-    // so that BlockAccess::search() starts scanning from the first record.
-    RelCacheTable::resetSearchIndex(srcRelId);
+    /*
+        The BlockAccess::search() function can either do a linearSearch or
+        a B+ tree search. Hence, reset the search index of the relation in the
+        relation cache using RelCacheTable::resetSearchIndex().
+        Also, reset the search index in the attribute cache for the select
+        condition attribute with name given by the argument `attr`. Use
+        AttrCacheTable::resetSearchIndex().
+        Both these calls are necessary to ensure that search begins from the
+        first record.
+    */
+    RelCacheTable::resetSearchIndex(srcRelid);
+    AttrCacheTable::resetSearchIndex(srcRelid, attr);
 
-    // Reset the search index of the select-condition attribute in the
-    // attribute cache. This is required for B+ tree search correctness;
-    // for linear search it is a no-op but kept for uniformity.
-   // AttrCacheTable::resetSearchIndex(srcRelId, attr); check this-----------------------------------------------------------
+    BlockAccess::comparisons = 0;
+  // Check if index exists to determine search method
+    int rootBlock = attrCatEntry.rootBlock;
+    bool usingIndex = (rootBlock != INVALID_BLOCKNUM);
+    
+    // Count records inserted
+    int recordCount = 0;
+    // read every record that satisfies the condition by repeatedly calling
+    // BlockAccess::search() until there are no more records to be read
 
-    // Repeatedly search for records satisfying (attr op attrVal).
-    // BlockAccess::search() fills `record` and returns SUCCESS each time
-    // it finds a match; returns E_NOTFOUND when no more matches exist.
-    while (BlockAccess::search(srcRelId, record, attr, attrVal, op) == SUCCESS) {
+    while (BlockAccess::search(srcRelid, record, attr,attrVal, op) == SUCCESS) {
 
-        // Insert the matched record into the target relation.
-        int insertRet = BlockAccess::insert(targetRelId, record);
+        // ret = BlockAccess::insert(targetRelId, record);
+        ret = BlockAccess::insert(targetRelId, record);
 
-        if (insertRet != SUCCESS) {
-            // Insertion failed (e.g. disk full). Clean up:
-            // close and delete the partially populated target relation,
-            // then propagate the error to the caller.
+        // if (insert fails) {
+        //     close the targetrel(by calling Schema::closeRel(targetrel))
+        //     delete targetrel (by calling Schema::deleteRel(targetrel))
+        //     return ret;
+        // }
+        if(ret != SUCCESS)
+        {
             Schema::closeRel(targetRel);
             Schema::deleteRel(targetRel);
-            return insertRet;
+            return ret;
         }
+        recordCount++;
     }
 
-    // All matching records have been copied. Close the target relation
-    // through the Schema layer so cache entries are written back to disk.
+    if (usingIndex) {
+        std::cout << " B+ Tree Index Search" << std::endl;
+    } else {
+        std::cout << "Linear Search" << std::endl;
+    }
+    std::cout << "Total Comparisons: " << BlockAccess::comparisons << std::endl;
+    std::cout << "Records Found: " << recordCount << std::endl;
+   
+    
+
+    // Close the targetRel by calling closeRel() method of schema layer
     Schema::closeRel(targetRel);
 
+    // return SUCCESS.
     return SUCCESS;
 }
 
